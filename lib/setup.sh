@@ -22,6 +22,7 @@ TCP_PORTS=(32400)
 UDP_PORTS=(32410 32412 32413 32414)
 FSTAB_MARK="# OmaPlex media drive:"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omaplex"
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 say() { gum style --foreground 4 --bold "▸ $1"; }
 ok() { gum style "✓ $1"; }
@@ -135,25 +136,30 @@ step_install() {
 # ---------- drive ----------
 
 pick_partition() {
-  local rows=() choice
-  mapfile -t rows < <(lsblk -rpno NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT | awk '
-    ($4=="part" || $4=="crypt") {
-      dev=$1; size=$2; fs=$3; mp=$5
-      if (fs=="") fs="-"; if (mp=="") mp="-"
-      if (mp=="/" || mp ~ "^/boot" || mp=="/home" || mp ~ "^/efi" || mp=="[SWAP]") next
-      if (fs=="swap" || fs=="zram" || fs=="crypto_LUKS" || fs=="vfat") next
-      printf "%-20s  %-8s  %-7s  %s\n", dev, size, fs, mp
-    }')
+  local rows=() labels=() choice i dev size fs label at uuid disks where
+  mapfile -t rows < <(python3 -I "$HERE/drives.py")
   ((${#rows[@]} > 0)) || die "No drives found. Plug your media drive in and try again."
-  choice=$(printf '%s\n' "${rows[@]}" | gum choose --height 15 \
-    --header "Pick the drive that holds (or will hold) your media — Drive / Size / Format / Open at")
+  for i in "${!rows[@]}"; do
+    IFS=$'\t' read -r dev size fs label at uuid disks <<<"${rows[$i]}"
+    [[ $label == - ]] && label="(no name)"
+    where="not open"
+    [[ $at != - ]] && where="open at $at"
+    ((disks > 1)) && size="$size × $disks disks"
+    labels+=("$(printf '%-16s  %-16s  %-6s  %s  [%s]' "$label" "$size" "$fs" "$where" "$dev")")
+  done
+  choice=$(printf '%s\n' "${labels[@]}" | gum choose --height 15 \
+    --header "Pick the drive that holds (or will hold) your media")
   [[ -n $choice ]] || die "Nothing picked. Cancelled."
-  DEVICE="${choice%% *}"
-  [[ -b $DEVICE ]] || die "That doesn't look like a real drive: $DEVICE"
+  for i in "${!labels[@]}"; do
+    if [[ ${labels[$i]} == "$choice" ]]; then
+      IFS=$'\t' read -r DEVICE _ _ _ _ _ DISKS <<<"${rows[$i]}"
+    fi
+  done
+  [[ -b ${DEVICE:-} ]] || die "That doesn't look like a real drive."
 }
 
 step_drive() {
-  local user="$USER" uid gid default_name base n pass mount_point name fs uuid ident opts line existing errfile
+  local DISKS=1 user="$USER" uid gid default_name base n pass mount_point name fs uuid ident opts line existing errfile
   uid=$(id -u)
   gid=$(id -g)
 
@@ -207,20 +213,22 @@ step_drive() {
   line="$ident  ${mount_point// /\\040}  $fs  $opts  0  $pass"
 
   gum style --border normal --padding "0 1" \
-    "Drive:        $DEVICE" \
+    "Drive:        $DEVICE$( ((DISKS > 1)) && echo " (and $((DISKS - 1)) more disk(s) in the same pool)")" \
     "Opens at:     $mount_point" \
     "Called:       $name" \
     "Format:       $fs"
   gum confirm "Make this drive available every time the computer starts?" || die "Cancelled."
 
   # The file manager may already have opened the drive somewhere else
-  # (/run/media/...). Close that first: the same drive can't be open twice.
-  existing=$(findmnt -no TARGET "$DEVICE" 2>/dev/null | head -n1 || true)
-  if [[ -n $existing && $existing != "$mount_point" ]]; then
-    note "Closing the drive at $existing so it can open at $mount_point instead."
-    udisksctl unmount -b "$DEVICE" >/dev/null 2>&1 || sudo umount "$existing" ||
-      die "Couldn't close the drive at $existing. Close any windows using it and try again."
-  fi
+  # (/run/media/...), sometimes more than once: a pool of several disks gets
+  # opened once per disk. Close every one so it opens in a single place.
+  local spot
+  while IFS= read -r spot; do
+    [[ -n $spot && $spot != "$mount_point" ]] || continue
+    note "Closing the drive at $spot so it can open at $mount_point instead."
+    sudo umount "$spot" ||
+      die "Couldn't close the drive at $spot. Close any windows using it and try again."
+  done < <(findmnt -rno TARGET -S "$ident" 2>/dev/null; findmnt -rno TARGET -S "$DEVICE" 2>/dev/null)
 
   sudo mkdir -p "$mount_point"
   sudo cp -a /etc/fstab "/etc/fstab.bak.$(date +%s)"
