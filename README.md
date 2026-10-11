@@ -79,7 +79,7 @@ The helper behind the panel works on its own too:
 ```
 
 With the shell running: `omarchy-shell nosignal.plex toggle`, `start`,
-`stop`, `restart`, `openWeb`, `status`.
+`stop`, `restart`, `openWeb`, `connect`, `status`.
 
 ## Privacy and permissions
 

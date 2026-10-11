@@ -183,6 +183,7 @@ Panel {
     function stop(): string { plex.stop(); return "ok" }
     function restart(): string { plex.restart(); return "ok" }
     function openWeb(): string { plex.openWeb(); return "ok" }
+    function connect(): string { plex.connect(); return "ok" }
   }
 
   BarIconButton {
