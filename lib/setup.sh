@@ -153,7 +153,7 @@ pick_partition() {
 }
 
 step_drive() {
-  local user="$USER" uid gid default_name base n mount_point name fs uuid ident opts line existing errfile
+  local user="$USER" uid gid default_name base n pass mount_point name fs uuid ident opts line existing errfile
   uid=$(id -u)
   gid=$(id -g)
 
@@ -194,10 +194,17 @@ step_drive() {
   ident="${ident:-$DEVICE}"
   # nofail: a missing drive must never stop the computer from booting.
   opts="defaults,nofail,x-gvfs-show,x-gvfs-name=${name// /\\040}"
+  # Windows-format drives have no owners, so open them as yours and readable
+  # by everyone. Skip the boot-time check on them (pass 0): NTFS has no
+  # checker here, and checking a big USB drive at every start only slows it.
+  pass=2
   case $fs in
-    exfat | ntfs) opts="uid=$uid,gid=$gid,umask=002,$opts" ;;
+    exfat | ntfs)
+      opts="uid=$uid,gid=$gid,umask=002,$opts"
+      pass=0
+      ;;
   esac
-  line="$ident  ${mount_point// /\\040}  $fs  $opts  0  2"
+  line="$ident  ${mount_point// /\\040}  $fs  $opts  0  $pass"
 
   gum style --border normal --padding "0 1" \
     "Drive:        $DEVICE" \
