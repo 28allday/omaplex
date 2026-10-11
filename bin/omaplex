@@ -1,0 +1,97 @@
+#!/bin/bash
+# omaplex — the OmaPlex panel's helper, and a small CLI in its own right.
+#
+#   omaplex status              JSON snapshot for the panel
+#   omaplex start|stop|restart  control the Plex Media Server service
+#   omaplex boot on|off         start Plex with the computer, or not
+#   omaplex open                open the Plex web app
+#   omaplex connect             save this server's sign-in token for the panel
+#   omaplex forget              delete the saved token
+#   omaplex scan <library-id>   ask Plex to scan one library for new files
+#   omaplex setup install|drive|uninstall
+#                               run a set-up step in a floating terminal
+#
+# Service control goes through plain systemctl: systemd asks polkit, and the
+# shell's own polkit agent draws the password prompt. No sudo, no zenity.
+
+set -euo pipefail
+
+SERVICE="plexmediaserver.service"
+WEB_URL="http://localhost:32400/web"
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LIB="$HERE/../lib"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omaplex"
+TOKEN_FILE="$CONFIG_DIR/token"
+# The AUR package keeps the server's data here; plexpass uses the same path.
+PREFS="/var/lib/plex/Plex Media Server/Preferences.xml"
+
+usage() {
+  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
+save_token() {
+  local token="$1"
+  [[ $token =~ ^[A-Za-z0-9_-]{8,128}$ ]] || fail "That doesn't look like a Plex token."
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
+  (umask 077 && printf '%s\n' "$token" >"$TOKEN_FILE.tmp")
+  mv -f "$TOKEN_FILE.tmp" "$TOKEN_FILE"
+}
+
+cmd_connect() {
+  # The server's own sign-in token sits in a file only the plex user can read,
+  # so one pkexec'd grep (a system binary, fixed path) fetches it. Nothing is
+  # written as root and the token never appears on a command line.
+  local out rc=0
+  out=$(pkexec /usr/bin/grep -o -m1 'PlexOnlineToken="[^"]*"' "$PREFS") || rc=$?
+  case $rc in
+    0) ;;
+    126 | 127) fail "Password prompt cancelled." ;;
+    1) fail "Plex isn't signed in yet. Open Plex, sign in to claim this server, then try again." ;;
+    *) fail "Couldn't read the Plex settings file." ;;
+  esac
+  out=${out#PlexOnlineToken=\"}
+  out=${out%\"}
+  save_token "$out"
+  echo "Connected"
+}
+
+cmd_setup() {
+  local step="${1:-}"
+  case $step in
+    install | drive | uninstall) ;;
+    *) usage 1 ;;
+  esac
+  printf -v cmd '%q %q' "$LIB/setup.sh" "$step"
+  exec omarchy-launch-floating-terminal-with-presentation "$cmd"
+}
+
+[[ $# -gt 0 ]] || usage 1
+
+case $1 in
+  status) exec python3 -I "$LIB/status.py" "$TOKEN_FILE" ;;
+  start | stop | restart) systemctl "$1" "$SERVICE" ;;
+  boot)
+    case "${2:-}" in
+      on) systemctl enable "$SERVICE" ;;
+      off) systemctl disable "$SERVICE" ;;
+      *) usage 1 ;;
+    esac
+    ;;
+  open) exec setsid omarchy-launch-webapp "$WEB_URL" >/dev/null 2>&1 ;;
+  connect) cmd_connect ;;
+  forget) rm -f "$TOKEN_FILE" && echo "Forgotten" ;;
+  scan)
+    [[ ${2:-} =~ ^[0-9]{1,6}$ ]] || fail "Usage: omaplex scan <library-id>"
+    exec python3 -I "$LIB/status.py" "$TOKEN_FILE" --scan "$2"
+    ;;
+  setup) cmd_setup "${2:-}" ;;
+  -h | --help | help) usage 0 ;;
+  *) usage 1 ;;
+esac

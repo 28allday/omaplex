@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "nosignal.plex",
+  "name": "OmaPlex",
+  "version": "0.1.0",
+  "author": "Gavin Nugent",
+  "license": "MIT",
+  "description": "Run a Plex Media Server from the Omarchy bar: installs Plex and starts it with the computer, turns it on and off, shows what's playing, scans libraries and sets up media drives.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaPlex",
+    "description": "Plex Media Server status and controls, now playing, and library scans.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30
+      }
+    ]
+  }
+}
