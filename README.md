@@ -117,8 +117,18 @@ walks you through it:
    Nothing on the drive is moved, renamed or deleted.
 5. **Empty drive?** You're offered `Movies`, `TV` and `Music` folders to get
    started.
+6. **Plex's artwork.** You're asked whether to keep Plex's artwork, posters
+   and video previews on this drive. For a big collection these can take many
+   gigabytes, so this is worth saying yes to if your computer's own drive is
+   small. They go in a `Plex Artwork` folder on the drive. Plex's library
+   database stays on your computer, so Plex stays quick, and Plex won't start
+   without the drive plugged in.
 
-Then open Plex, add a library, and point it at the drive.
+Then open Plex, add a library, and point it at the drive: choose the folder
+under `/media/<your username>/<name>`.
+
+Choosing **Add a media drive** for a drive that's already set up skips
+straight to the artwork question, so you can move the artwork later.
 
 Drives formatted for Windows or a Mac (exFAT or NTFS) work as they are. If you
 also use the drive on another computer, nothing changes for it there.
@@ -132,6 +142,9 @@ further it asks whether to:
 - **delete Plex's settings, watch history and artwork** (say no if you might
   reinstall: Plex will pick up where it left off)
 - **stop opening your media drives automatically**
+
+If Plex's artwork was on a media drive, deleting Plex's settings deletes the
+`Plex Artwork` folder there too.
 
 Your media files are never touched.
 
@@ -162,8 +175,11 @@ Plex Media Server itself updates whenever you update Omarchy.
 **The panel says "Starting…" for a while.** Plex takes a few seconds to wake
 up after it starts, a bit longer the first time. Give it a moment.
 
-**Plex can't see my files.** If the drive was set up with **Add a media
-drive**, run it again for that drive. Otherwise make sure the folder is one
+**Plex can't see my files.** In Plex, pick your media from
+`/media/<your username>/<drive name>`. A drive your file manager opened by
+itself appears under `/run/media/…` instead, and that folder is private to
+you, so Plex can't look inside. **Add a media drive** fixes this. If the drive
+was set up with **Add a media drive**, run it again for that drive. Otherwise make sure the folder is one
 Plex is allowed to read. Folders inside your home folder are private to you
 by default, so a separate drive is the easiest place for media.
 
