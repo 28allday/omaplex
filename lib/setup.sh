@@ -200,6 +200,126 @@ move_artwork() {
   note "If this drive isn't plugged in, Plex waits for it instead of starting without it."
 }
 
+# ---------- sleep ----------
+
+# Every whole disk under a filesystem, by UUID (all members of a pool) and by
+# the device picked: fs_disks <uuid> <device>
+fs_disks() {
+  local d
+  {
+    [[ -n $1 ]] && lsblk -rpno NAME,UUID | awk -v u="$1" '$2 == u { print $1 }'
+    printf '%s\n' "$2"
+  } | sort -u | while IFS= read -r d; do
+    lsblk -nrpso NAME,TYPE "$d" 2>/dev/null | awk '$2 == "disk" { print $1 }'
+  done | sort -u
+}
+
+udisks_drive() {
+  udisksctl info -b "$1" 2>/dev/null | sed -n "s/^ *Drive: *'\(.*\)'/\1/p"
+}
+
+drive_property() {
+  # drive_property <object path> <interface suffix> <property> -> value only
+  busctl get-property org.freedesktop.UDisks2 "$1" "org.freedesktop.UDisks2.$2" "$3" 2>/dev/null |
+    awk '{ print $2 }'
+}
+
+# Add noatime to the drive's OmaPlex fstab line if it lacks it, so playing a
+# file doesn't also write "last opened" times back to the disks.
+ensure_noatime() {
+  local mount_point="$1" escaped
+  escaped="${mount_point// /\\040}"
+  grep -qsE "^[^#]*[[:space:]]${escaped//\\/\\\\}[[:space:]].*noatime" /etc/fstab && return 0
+  sudo cp -a /etc/fstab "/etc/fstab.bak.$(date +%s)"
+  # Through the environment, not awk -v: -v would turn fstab's \040 into a
+  # space and the mount point would never match.
+  sudo env MARK="$FSTAB_MARK" MP="$escaped" awk '
+    owned && $2 == ENVIRON["MP"] && $4 !~ /(^|,)noatime(,|$)/ { $4 = $4 ",noatime" }
+    { owned = (index($0, ENVIRON["MARK"]) == 1); print }' /etc/fstab | sudo tee /etc/fstab.omaplex >/dev/null
+  sudo mv -f /etc/fstab.omaplex /etc/fstab
+  sudo systemctl daemon-reload
+  sudo mount -o remount,noatime "$mount_point" 2>/dev/null || true
+}
+
+# Plex settings that decide how often it wakes the disks: look for changes
+# as they happen (cheap) rather than re-reading every library on a timer.
+quiet_plex_scans() {
+  local token tokfile prefs want key value changed=0
+  token=$(sudo grep -o -m1 'PlexOnlineToken="[^"]*"' "$PLEX_DATA/Preferences.xml" 2>/dev/null || true)
+  token=${token#PlexOnlineToken=\"}
+  token=${token%\"}
+  if [[ -z $token ]]; then
+    note "Once you've signed in to Plex, turn off Settings → Library → \"Scan my library"
+    note "periodically\" so Plex doesn't wake the drive on a timer."
+    return 0
+  fi
+  tokfile=$(mktemp)
+  printf 'X-Plex-Token: %s\n' "$token" >"$tokfile"
+  prefs=$(curl -fsS --max-time 5 -H @"$tokfile" -H 'Accept: application/json' http://127.0.0.1:32400/:/prefs 2>/dev/null || true)
+  want=(ScheduledLibraryUpdatesEnabled=0 FSEventLibraryUpdatesEnabled=1 FSEventLibraryPartialScanEnabled=1)
+  for key in "${want[@]}"; do
+    value=${key#*=}
+    key=${key%%=*}
+    # Only touch settings this Plex version actually has.
+    grep -Eq "\"id\": ?\"$key\"" <<<"$prefs" || continue
+    curl -fsS --max-time 5 -X PUT -H @"$tokfile" -o /dev/null "http://127.0.0.1:32400/:/prefs?$key=$value" &&
+      changed=$((changed + 1))
+  done
+  rm -f "$tokfile"
+  if ((changed > 0)); then
+    ok "Plex now looks for new files as they appear instead of re-reading your libraries on a timer."
+  else
+    note "In Plex, turn off Settings → Library → \"Scan my library periodically\" and turn on"
+    note "\"Scan my library automatically\", so Plex doesn't wake the drive on a timer."
+  fi
+}
+
+# setup_sleep <mount point> <uuid> <device>
+setup_sleep() {
+  local mount_point="$1" disks=() spinning=() d path choice value idle
+  mapfile -t disks < <(fs_disks "$2" "$3")
+  for d in "${disks[@]}"; do
+    path=$(udisks_drive "$d")
+    [[ -n $path ]] || continue
+    # 0 is a solid-state drive: nothing spins, so nothing to put to sleep.
+    [[ $(drive_property "$path" Drive RotationRate) != 0 ]] || continue
+    [[ $(drive_property "$path" Drive.Ata PmSupported) == true ]] || continue
+    spinning+=("$path")
+  done
+  if ((${#spinning[@]} == 0)); then
+    note "This drive doesn't spin, or can't be told to sleep, so there's no sleep timer to set."
+    return 0
+  fi
+
+  echo
+  note "Hard drives can stop spinning while nobody is watching anything. That saves power"
+  note "and wear, at the cost of a pause of a few seconds when someone presses play."
+  choice=$(printf '%s\n' "After 30 minutes (recommended)" "After 1 hour" "After 2 hours" "Never: keep it spinning" |
+    gum choose --header "Let this drive sleep when it isn't being used?")
+  # Standby timer in the drive's own units: 241-251 mean (n - 240) x 30 min.
+  case $choice in
+    "After 30 minutes"*) value=241 idle="30 minutes" ;;
+    "After 1 hour") value=242 idle="an hour" ;;
+    "After 2 hours") value=244 idle="2 hours" ;;
+    Never*) value=0 ;;
+    *) return 0 ;;
+  esac
+
+  # udisks stores this per disk and applies it now and at every start.
+  for path in "${spinning[@]}"; do
+    sudo busctl call org.freedesktop.UDisks2 "$path" org.freedesktop.UDisks2.Drive \
+      SetConfiguration 'a{sv}a{sv}' 1 ata-pm-standby i "$value" 0 ||
+      note "Couldn't set the sleep timer on one of the disks."
+  done
+  if ((value == 0)); then
+    ok "The drive keeps spinning."
+    return 0
+  fi
+  ensure_noatime "$mount_point"
+  quiet_plex_scans
+  ok "The drive now sleeps after $idle with nothing playing, and wakes when it's needed."
+}
+
 # ---------- drive ----------
 
 pick_partition() {
@@ -266,6 +386,7 @@ step_drive() {
     if pacman -Q plex-media-server >/dev/null 2>&1 || pacman -Q plex-media-server-plexpass >/dev/null 2>&1; then
       move_artwork "$existing"
     fi
+    setup_sleep "$existing" "$uuid" "$DEVICE"
     return 0
   fi
   ok "Picked $DEVICE"
@@ -297,7 +418,8 @@ step_drive() {
   ident="${uuid:+UUID=$uuid}"
   ident="${ident:-$DEVICE}"
   # nofail: a missing drive must never stop the computer from booting.
-  opts="defaults,nofail,x-gvfs-show,x-gvfs-name=${name// /\\040}"
+  # noatime: playing a file shouldn't write to the disk (and keep it awake).
+  opts="defaults,nofail,noatime,x-gvfs-show,x-gvfs-name=${name// /\\040}"
   # Windows-format drives have no owners, so open them as yours and readable
   # by everyone. Skip the boot-time check on them (pass 0): NTFS has no
   # checker here, and checking a big USB drive at every start only slows it.
@@ -370,6 +492,7 @@ step_drive() {
   if pacman -Q plex-media-server >/dev/null 2>&1 || pacman -Q plex-media-server-plexpass >/dev/null 2>&1; then
     move_artwork "$mount_point"
   fi
+  setup_sleep "$mount_point" "$uuid" "$DEVICE"
 
   echo
   ok "Done. In Plex, add a library and point it at $mount_point"

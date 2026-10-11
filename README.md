@@ -124,11 +124,27 @@ walks you through it:
    database stays on your computer, so Plex stays quick, and Plex won't start
    without the drive plugged in.
 
+7. **Let it sleep.** A hard drive can stop spinning while nobody is watching
+   anything: after 30 minutes (recommended), an hour, two hours, or never.
+   That saves power and wear. The cost is a pause of a few seconds when
+   someone presses play while it's asleep. If the drive is a pool of several
+   disks, every disk gets the same timer. Solid-state drives don't spin, so
+   they aren't asked.
+
+   OmaPlex also stops two things that keep a drive awake for no reason: it
+   opens the drive so that playing a file doesn't write to it, and it sets
+   Plex to look for new files as they arrive instead of re-reading your
+   libraries on a timer.
+
 Then open Plex, add a library, and point it at the drive: choose the folder
 under `/media/<your username>/<name>`.
 
 Choosing **Add a media drive** for a drive that's already set up skips
-straight to the artwork question, so you can move the artwork later.
+straight to the artwork and sleep questions, so you can change those later.
+
+Plex also runs heavier jobs, like making video previews, in a maintenance
+window overnight (2–5 am unless you change it in Plex → Settings →
+Scheduled Tasks). The drive wakes for those and sleeps again afterwards.
 
 Drives formatted for Windows or a Mac (exFAT or NTFS) work as they are. If you
 also use the drive on another computer, nothing changes for it there.
