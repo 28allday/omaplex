@@ -153,7 +153,7 @@ pick_partition() {
 }
 
 step_drive() {
-  local user="$USER" uid gid default_name n mount_point name fs uuid ident opts line existing errfile
+  local user="$USER" uid gid default_name base n mount_point name fs uuid ident opts line existing errfile
   uid=$(id -u)
   gid=$(id -g)
 
@@ -166,10 +166,13 @@ step_drive() {
   fi
   ok "Picked $DEVICE"
 
-  default_name="MediaDrive"
+  # Suggest the drive's own label when it makes a usable name.
+  default_name=$(lsblk -no LABEL "$DEVICE" 2>/dev/null | head -n1 || true)
+  [[ $default_name =~ ^[A-Za-z0-9._\ -]{1,40}$ && $default_name != .* ]] || default_name="MediaDrive"
   n=2
+  base="$default_name"
   while [[ -e "/media/$user/$default_name" ]]; do
-    default_name="MediaDrive$n"
+    default_name="$base$n"
     n=$((n + 1))
   done
   name=$(gum input --header "What should this drive be called in your file manager?" --value "$default_name")
@@ -202,6 +205,15 @@ step_drive() {
     "Called:       $name" \
     "Format:       $fs"
   gum confirm "Make this drive available every time the computer starts?" || die "Cancelled."
+
+  # The file manager may already have opened the drive somewhere else
+  # (/run/media/...). Close that first: the same drive can't be open twice.
+  existing=$(findmnt -no TARGET "$DEVICE" 2>/dev/null | head -n1 || true)
+  if [[ -n $existing && $existing != "$mount_point" ]]; then
+    note "Closing the drive at $existing so it can open at $mount_point instead."
+    udisksctl unmount -b "$DEVICE" >/dev/null 2>&1 || sudo umount "$existing" ||
+      die "Couldn't close the drive at $existing. Close any windows using it and try again."
+  fi
 
   sudo mkdir -p "$mount_point"
   sudo cp -a /etc/fstab "/etc/fstab.bak.$(date +%s)"
