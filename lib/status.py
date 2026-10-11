@@ -72,6 +72,32 @@ def service_state():
     }
 
 
+def server_mode():
+    # Dedicated-server mode masks the sleep targets; that's the source of truth.
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-enabled", "suspend.target"],
+            capture_output=True, text=True, timeout=TIMEOUT, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return out == "masked"
+
+
+def power_profile():
+    try:
+        out = subprocess.run(
+            ["busctl", "get-property", "org.freedesktop.UPower.PowerProfiles",
+             "/org/freedesktop/UPower/PowerProfiles",
+             "org.freedesktop.UPower.PowerProfiles", "ActiveProfile"],
+            capture_output=True, text=True, timeout=TIMEOUT, check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    # busctl prints: s "balanced"
+    return clip(out.strip().partition(" ")[2].strip('"'), 20)
+
+
 def lan_address():
     # A UDP "connect" sends nothing; it just asks the kernel which source
     # address it would route from, which is the one other devices can reach.
@@ -136,6 +162,8 @@ def snapshot(token_path):
         "starting": state["activeState"] in ("activating", "reloading"),
         "enabled": state["enabled"],
         "address": lan_address(),
+        "serverMode": server_mode(),
+        "powerProfile": power_profile(),
         "reachable": False,
         "claimed": False,
         "version": "",

@@ -5,6 +5,7 @@
 #   setup.sh install     install Plex, start it now and at every boot
 #   setup.sh drive       make a media drive always available to Plex
 #   setup.sh uninstall   remove Plex and undo what install did
+#   setup.sh server      turn dedicated-server mode (never sleep) on or off
 #
 # Everything the user reads is plain English: no fstab, setfacl or AUR.
 
@@ -121,6 +122,8 @@ step_install() {
     note "No firewall is running, so there's nothing to open."
   fi
 
+  offer_server_mode
+
   say "Adding Plex to your apps"
   if omarchy-webapp-install "$WEBAPP_NAME" "$WEB_URL" "$WEBAPP_ICON" >/dev/null 2>&1; then
     ok "Plex is in the app launcher."
@@ -144,6 +147,82 @@ step_install() {
   note "what's playing and scan your libraries from the bar."
   wait_for_plex
   setsid omarchy-launch-webapp "$WEB_URL" >/dev/null 2>&1 &
+}
+
+# ---------- server mode ----------
+
+# Sleep states blocked in server mode: any of them takes Plex off the network.
+SLEEP_TARGETS=(sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target)
+SERVER_MARK="$CONFIG_DIR/server-mode"
+
+has_battery() {
+  local supply
+  for supply in /sys/class/power_supply/*; do
+    [[ -r $supply/type && $(<"$supply/type") == Battery ]] || continue
+    # A wireless mouse or keyboard reports its battery as scope "Device".
+    [[ -r $supply/scope && $(<"$supply/scope") == Device ]] && continue
+    return 0
+  done
+  return 1
+}
+
+server_mode_on() {
+  [[ $(systemctl is-enabled suspend.target 2>/dev/null) == masked ]]
+}
+
+server_on() {
+  local previous
+  previous=$(powerprofilesctl get 2>/dev/null || true)
+  sudo systemctl mask "${SLEEP_TARGETS[@]}" >/dev/null 2>&1 || die "Couldn't stop this computer from sleeping."
+  mkdir -p "$CONFIG_DIR"
+  printf 'previous_profile=%s\n' "$previous" >"$SERVER_MARK"
+  ok "This computer won't go to sleep, so Plex is always there."
+  # Omarchy remembers a profile for mains power and restores it at every
+  # start, so set it through Omarchy; powerprofilesctl alone wouldn't last.
+  if command -v omarchy-powerprofiles-set >/dev/null && omarchy-powerprofiles-list 2>/dev/null | grep -qx balanced; then
+    omarchy-powerprofiles-set ac balanced && ok "Power set to Balanced: full speed when Plex is busy, less power when it isn't."
+  fi
+}
+
+server_off() {
+  local previous=""
+  sudo systemctl unmask "${SLEEP_TARGETS[@]}" >/dev/null 2>&1 || true
+  ok "This computer can go to sleep again."
+  [[ -r $SERVER_MARK ]] && previous=$(sed -n 's/^previous_profile=//p' "$SERVER_MARK")
+  if [[ -n $previous ]] && command -v omarchy-powerprofiles-set >/dev/null; then
+    omarchy-powerprofiles-set ac "$previous" && ok "Power profile is back to ${previous^}."
+  fi
+  rm -f "$SERVER_MARK"
+}
+
+offer_server_mode() {
+  local default=true
+  server_mode_on && return 0
+  echo
+  note "If this computer is mainly here to run Plex, it should never go to sleep (Plex"
+  note "disappears from your TV and phone while it does), and it doesn't need to sit at"
+  note "full power when nobody is watching."
+  if has_battery; then
+    default=false
+    note "This looks like a laptop, so say no unless it stays plugged in as a server."
+  fi
+  if gum confirm --default="$default" "Is this computer a dedicated Plex server?"; then
+    server_on
+  else
+    note "Left as it is. You can change this from the OmaPlex panel any time."
+  fi
+}
+
+step_server() {
+  say "Dedicated Plex server"
+  if server_mode_on; then
+    note "This computer is set up as a dedicated Plex server: it never sleeps."
+    if gum confirm --default=false "Turn that off and let it sleep again?"; then
+      server_off
+    fi
+  else
+    offer_server_mode
+  fi
 }
 
 # ---------- artwork ----------
@@ -508,6 +587,11 @@ step_uninstall() {
   # Read before anything is removed: the link is the only record of where.
   artwork=$(artwork_home)
 
+  # Only undo server mode if OmaPlex turned it on.
+  if [[ -r $SERVER_MARK ]]; then
+    server_off
+  fi
+
   if systemctl list-unit-files "$SERVICE" >/dev/null 2>&1; then
     sudo systemctl disable --now "$SERVICE" 2>/dev/null || true
     ok "Plex is stopped and won't start with the computer."
@@ -572,8 +656,9 @@ case "${1:-}" in
   install) step_install ;;
   drive) step_drive ;;
   uninstall) step_uninstall ;;
+  server) step_server ;;
   *)
-    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

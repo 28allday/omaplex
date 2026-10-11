@@ -8,7 +8,7 @@
 #   omaplex connect             save this server's sign-in token for the panel
 #   omaplex forget              delete the saved token
 #   omaplex scan <library-id>   ask Plex to scan one library for new files
-#   omaplex setup install|drive|uninstall
+#   omaplex setup install|drive|server|uninstall
 #                               run a set-up step in a floating terminal
 #
 # Service control goes through plain systemctl: systemd asks polkit, and the
@@ -65,7 +65,7 @@ cmd_connect() {
 cmd_setup() {
   local step="${1:-}"
   case $step in
-    install | drive | uninstall) ;;
+    install | drive | server | uninstall) ;;
     *) usage 1 ;;
   esac
   printf -v cmd '%q %q' "$LIB/setup.sh" "$step"

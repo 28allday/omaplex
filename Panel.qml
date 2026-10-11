@@ -86,7 +86,7 @@ Panel {
     keys.push("power", "boot", "open")
     if (showClaim) keys.push("claim")
     if (showConnect) keys.push("connect")
-    keys.push("drive", "restart")
+    keys.push("server", "drive", "restart")
     if (plex.connected) {
       for (var i = 0; i < plex.libraries.length; i++) keys.push("lib:" + plex.libraries[i].id)
     }
@@ -117,6 +117,7 @@ Panel {
     else if (key === "boot") plex.setBoot(!plex.enabled)
     else if (key === "open" || key === "claim") plex.openWeb()
     else if (key === "connect") plex.connect()
+    else if (key === "server") plex.serverSetup()
     else if (key === "drive") plex.addDrive()
     else if (key === "restart") plex.restart()
     else if (key === "uninstall") plex.uninstall()
@@ -356,6 +357,15 @@ Panel {
               icon: root.glyph(0xF0306)
               title: plex.tokenSaved ? "Connect again" : "Connect OmaPlex to Plex"
               subtitle: "Shows what's playing and lets you scan libraries"
+            }
+
+            ActionRow {
+              rowKey: "server"
+              icon: root.glyph(0xF048B)
+              title: "Dedicated server"
+              subtitle: plex.serverMode
+                ? "Never sleeps" + (plex.powerProfile !== "" ? " · " + plex.powerProfile.charAt(0).toUpperCase() + plex.powerProfile.slice(1) + " power" : "")
+                : "Off: this computer can go to sleep"
             }
 
             ActionRow {

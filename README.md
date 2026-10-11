@@ -44,9 +44,10 @@ password, it's the one you log in with. It:
 2. starts it now, and every time your computer starts
 3. lets your TV, phone and other computers at home (and on your Tailscale
    network) find it
-4. adds Plex to your app launcher
-5. offers to set up a media drive
-6. opens Plex so you can sign in
+4. asks whether this computer is a **dedicated Plex server** (see below)
+5. adds Plex to your app launcher
+6. offers to set up a media drive
+7. opens Plex so you can sign in
 
 Already added OmaPlex some other way? Click the Plex icon in the bar and
 choose **Install Plex Media Server**. It does exactly the same thing.
@@ -78,6 +79,7 @@ Click the Plex icon in the bar to open the panel.
 | **Start with the computer** | When on, Plex starts by itself after a restart |
 | **Open Plex** | Opens Plex, where you watch things and change settings |
 | **Connect OmaPlex to Plex** | Shows what's playing and your libraries in the panel (only needed once) |
+| **Dedicated server** | Keeps this computer awake for Plex (see below) |
 | **Add a media drive** | Sets up a drive for your media (see below) |
 | **Restart Plex** | Turns Plex off and on again, which fixes most hiccups |
 | **Now playing** | Who's watching what, on which device, and how far in |
@@ -101,6 +103,22 @@ opens Plex.
 | `s` | Look for new files in the highlighted library |
 | `r` | Refresh |
 | `Esc` | Close |
+
+## Dedicated server
+
+If the computer is mainly there to run Plex, say yes when the install asks
+"Is this computer a dedicated Plex server?" (or choose **Dedicated server**
+in the panel later). OmaPlex then:
+
+- **stops the computer from going to sleep,** even from the menu, because
+  Plex disappears from your TV and phone while it sleeps. The screen still
+  locks and switches off as usual.
+- **sets the power profile to Balanced** while plugged in: full speed when
+  Plex is busy, less power when nobody is watching.
+
+On a laptop the question defaults to no. Choosing **Dedicated server** again
+turns it off and puts your previous power profile back, and so does
+**Remove Plex**.
 
 ## Adding a media drive
 
@@ -152,7 +170,9 @@ also use the drive on another computer, nothing changes for it there.
 ## Removing Plex
 
 Choose **Remove Plex** in the panel. It stops and uninstalls Plex, closes the
-network access it opened, and removes it from your app launcher. Before going
+network access it opened, removes it from your app launcher, and if this
+computer was set up as a dedicated server, lets it sleep again and restores
+your power profile. Before going
 further it asks whether to:
 
 - **delete Plex's settings, watch history and artwork** (say no if you might

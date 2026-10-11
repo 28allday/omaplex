@@ -23,6 +23,8 @@ Item {
   property string version: ""
   property string serverName: ""
   property string address: ""
+  property bool serverMode: false
+  property string powerProfile: ""
   property var sessions: []
   property var libraries: []
   property bool loaded: false
@@ -90,6 +92,8 @@ Item {
     version = String(s.version || "")
     serverName = String(s.name || "")
     address = String(s.address || "")
+    serverMode = s.serverMode === true
+    powerProfile = String(s.powerProfile || "")
     sessions = s.sessions instanceof Array ? s.sessions : []
     libraries = s.libraries instanceof Array ? s.libraries : []
     if (_desired !== -1 && running === (_desired === 1)) _desired = -1
@@ -126,6 +130,7 @@ Item {
   function install() { Quickshell.execDetached([helper, "setup", "install"]) }
   function addDrive() { Quickshell.execDetached([helper, "setup", "drive"]) }
   function uninstall() { Quickshell.execDetached([helper, "setup", "uninstall"]) }
+  function serverSetup() { Quickshell.execDetached([helper, "setup", "server"]) }
 
   Timer {
     id: refreshTimer
