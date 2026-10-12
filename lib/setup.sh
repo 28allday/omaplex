@@ -400,7 +400,9 @@ install_spindown_watcher() {
 spindown_set() {
   local minutes="$1" id
   shift
-  sudo touch "$SPINDOWN_CONF" 2>/dev/null || true
+  # The folder doesn't exist until the first drive is set up.
+  sudo install -d -m 755 "$(dirname "$SPINDOWN_CONF")"
+  sudo touch "$SPINDOWN_CONF"
   for id in "$@"; do
     sudo env ID="$id" awk '$1 != ENVIRON["ID"]' "$SPINDOWN_CONF" | sudo tee "$SPINDOWN_CONF.new" >/dev/null
     ((minutes > 0)) && printf '%s %s\n' "$id" "$minutes" | sudo tee -a "$SPINDOWN_CONF.new" >/dev/null
