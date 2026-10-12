@@ -149,6 +149,11 @@ walks you through it:
    disks, every disk gets the same timer. Solid-state drives don't spin, so
    they aren't asked.
 
+   Many NAS drives (WD Red among them) ignore their own sleep timer, so
+   OmaPlex doesn't rely on it: a small background service notices when a
+   disk has had nothing to do for the time you chose and tells it to sleep.
+   Checking on the disks never wakes them.
+
    OmaPlex also stops two things that keep a drive awake for no reason: it
    opens the drive so that playing a file doesn't write to it, and it sets
    Plex to look for new files as they arrive instead of re-reading your
@@ -180,7 +185,7 @@ further it asks whether to:
 - **stop opening your media drives automatically**
 
 If Plex's artwork was on a media drive, deleting Plex's settings deletes the
-`Plex Artwork` folder there too.
+`Plex Artwork` folder there too. The drive-sleep service is removed as well.
 
 Your media files are never touched.
 

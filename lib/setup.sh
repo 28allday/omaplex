@@ -154,6 +154,9 @@ step_install() {
 # Sleep states blocked in server mode: any of them takes Plex off the network.
 SLEEP_TARGETS=(sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target)
 SERVER_MARK="$CONFIG_DIR/server-mode"
+SPINDOWN_BIN=/usr/local/lib/omaplex/omaplex-spindown
+SPINDOWN_CONF=/etc/omaplex/spindown.conf
+SPINDOWN_UNIT=/etc/systemd/system/omaplex-spindown.service
 
 has_battery() {
   local supply
@@ -353,20 +356,83 @@ quiet_plex_scans() {
   fi
 }
 
+# The disk's permanent name under /dev/disk/by-id, so the watcher still finds
+# it if it comes up as sdb instead of sda next time.
+disk_id() {
+  local link
+  for link in $(udevadm info -q symlink -n "$1" 2>/dev/null); do
+    case $link in
+      disk/by-id/ata-* | disk/by-id/usb-* | disk/by-id/scsi-*) echo "/dev/$link" && return 0 ;;
+    esac
+  done
+  for link in $(udevadm info -q symlink -n "$1" 2>/dev/null); do
+    [[ $link == disk/by-id/wwn-* ]] && echo "/dev/$link" && return 0
+  done
+  return 1
+}
+
+# Install (or refresh) the watcher that puts idle disks to sleep. It runs as
+# root, so it's copied somewhere only root can change rather than run from
+# the plugin folder.
+install_spindown_watcher() {
+  omarchy-pkg-add hdparm >/dev/null || die "Couldn't install hdparm, which puts the drives to sleep."
+  sudo install -Dm755 "$HERE/spindown.sh" "$SPINDOWN_BIN"
+  sudo install -d -m 755 "$(dirname "$SPINDOWN_CONF")"
+  sudo touch "$SPINDOWN_CONF"
+  printf '%s\n' \
+    "[Unit]" \
+    "Description=OmaPlex: put idle media drives to sleep" \
+    "" \
+    "[Service]" \
+    "ExecStart=$SPINDOWN_BIN" \
+    "Restart=on-failure" \
+    "RestartSec=10" \
+    "" \
+    "[Install]" \
+    "WantedBy=multi-user.target" | sudo tee "$SPINDOWN_UNIT" >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl enable "$(basename "$SPINDOWN_UNIT")" >/dev/null 2>&1
+  sudo systemctl restart "$(basename "$SPINDOWN_UNIT")"
+}
+
+# spindown_set <minutes, 0 = never> <by-id path>...: replace these disks'
+# lines in the watcher's list; stop the watcher when the list empties.
+spindown_set() {
+  local minutes="$1" id
+  shift
+  sudo touch "$SPINDOWN_CONF" 2>/dev/null || true
+  for id in "$@"; do
+    sudo env ID="$id" awk '$1 != ENVIRON["ID"]' "$SPINDOWN_CONF" | sudo tee "$SPINDOWN_CONF.new" >/dev/null
+    ((minutes > 0)) && printf '%s %s\n' "$id" "$minutes" | sudo tee -a "$SPINDOWN_CONF.new" >/dev/null
+    sudo mv -f "$SPINDOWN_CONF.new" "$SPINDOWN_CONF"
+  done
+  if [[ -s $SPINDOWN_CONF ]]; then
+    install_spindown_watcher
+  elif [[ -e $SPINDOWN_UNIT ]]; then
+    sudo systemctl disable --now "$(basename "$SPINDOWN_UNIT")" >/dev/null 2>&1 || true
+  fi
+}
+
+remove_spindown_watcher() {
+  [[ -e $SPINDOWN_UNIT || -e $SPINDOWN_CONF ]] || return 0
+  sudo systemctl disable --now "$(basename "$SPINDOWN_UNIT")" >/dev/null 2>&1 || true
+  sudo rm -f "$SPINDOWN_UNIT" "$SPINDOWN_BIN" "$SPINDOWN_CONF"
+  sudo rmdir "$(dirname "$SPINDOWN_CONF")" "$(dirname "$SPINDOWN_BIN")" 2>/dev/null || true
+  sudo systemctl daemon-reload
+}
+
 # setup_sleep <mount point> <uuid> <device>
 setup_sleep() {
-  local mount_point="$1" disks=() spinning=() d path choice value idle
+  local mount_point="$1" disks=() ids=() d id path choice value minutes idle
   mapfile -t disks < <(fs_disks "$2" "$3")
   for d in "${disks[@]}"; do
-    path=$(udisks_drive "$d")
-    [[ -n $path ]] || continue
-    # 0 is a solid-state drive: nothing spins, so nothing to put to sleep.
-    [[ $(drive_property "$path" Drive RotationRate) != 0 ]] || continue
-    [[ $(drive_property "$path" Drive.Ata PmSupported) == true ]] || continue
-    spinning+=("$path")
+    # 0 means solid-state: nothing spins, so nothing to put to sleep.
+    [[ $(cat "/sys/block/${d##*/}/queue/rotational" 2>/dev/null) == 1 ]] || continue
+    id=$(disk_id "$d") || continue
+    ids+=("$id")
   done
-  if ((${#spinning[@]} == 0)); then
-    note "This drive doesn't spin, or can't be told to sleep, so there's no sleep timer to set."
+  if ((${#ids[@]} == 0)); then
+    note "This drive doesn't spin, so there's nothing to put to sleep."
     return 0
   fi
 
@@ -375,22 +441,27 @@ setup_sleep() {
   note "and wear, at the cost of a pause of a few seconds when someone presses play."
   choice=$(printf '%s\n' "After 30 minutes (recommended)" "After 1 hour" "After 2 hours" "Never: keep it spinning" |
     gum choose --header "Let this drive sleep when it isn't being used?")
-  # Standby timer in the drive's own units: 241-251 mean (n - 240) x 30 min.
+  # value: the drive's own standby timer (241-251 mean (n - 240) x 30 min).
   case $choice in
-    "After 30 minutes"*) value=241 idle="30 minutes" ;;
-    "After 1 hour") value=242 idle="an hour" ;;
-    "After 2 hours") value=244 idle="2 hours" ;;
-    Never*) value=0 ;;
+    "After 30 minutes"*) minutes=30 value=241 idle="30 minutes" ;;
+    "After 1 hour") minutes=60 value=242 idle="an hour" ;;
+    "After 2 hours") minutes=120 value=244 idle="2 hours" ;;
+    Never*) minutes=0 value=0 ;;
     *) return 0 ;;
   esac
 
-  # udisks stores this per disk and applies it now and at every start.
-  for path in "${spinning[@]}"; do
+  # Set the drive's own timer too: harmless, and it covers drives that honour
+  # it if the watcher is ever stopped. Many NAS drives ignore it, though,
+  # which is why the watcher below does the real work.
+  for d in "${disks[@]}"; do
+    path=$(udisks_drive "$d")
+    [[ -n $path && $(drive_property "$path" Drive.Ata PmSupported) == true ]] || continue
     sudo busctl call org.freedesktop.UDisks2 "$path" org.freedesktop.UDisks2.Drive \
-      SetConfiguration 'a{sv}a{sv}' 1 ata-pm-standby i "$value" 0 ||
-      note "Couldn't set the sleep timer on one of the disks."
+      SetConfiguration 'a{sv}a{sv}' 1 ata-pm-standby i "$value" 0 >/dev/null 2>&1 || true
   done
-  if ((value == 0)); then
+  spindown_set "$minutes" "${ids[@]}"
+
+  if ((minutes == 0)); then
     ok "The drive keeps spinning."
     return 0
   fi
@@ -586,6 +657,8 @@ step_uninstall() {
 
   # Read before anything is removed: the link is the only record of where.
   artwork=$(artwork_home)
+
+  remove_spindown_watcher
 
   # Only undo server mode if OmaPlex turned it on.
   if [[ -r $SERVER_MARK ]]; then
