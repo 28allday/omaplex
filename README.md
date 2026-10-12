@@ -227,6 +227,22 @@ by default, so a separate drive is the easiest place for media.
 **"Plex no longer accepts the saved sign-in."** This happens if you sign out
 of Plex or reset the server. Choose **Connect** again.
 
+**My drives don't go to sleep.** They sleep only after the time you chose
+with nothing at all happening on them, so anything that reads the drive
+starts the count again: someone watching, browsing Plex while its artwork is
+on that drive, or Plex's overnight jobs. In the first few nights after adding
+a big library, Plex works through every film, song and show (loudness,
+previews and so on), and the drives stay busy until it's finished. To see
+when the drives were last put to sleep:
+
+```bash
+journalctl -u omaplex-spindown
+```
+
+Lines like "asleep after 30 min with nothing to do" mean it's working. To
+change the time, or switch it off, choose **Add a media drive** and pick the
+same drive again.
+
 **My TV or phone can't find the server.** Check that it's on the same network
 as your computer, and that Plex is running (the icon is bright, not dim).
 
