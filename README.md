@@ -53,7 +53,7 @@ Already added OmaPlex some other way? Click the Plex icon in the bar and
 choose **Install Plex Media Server**. It does exactly the same thing.
 
 <p align="center">
-  <img src="screenshots/install.png" alt="OmaPlex before Plex is installed, offering to install it" width="440">
+  <img src="screenshots/first-run.png" alt="OmaPlex before Plex is installed, offering to install it" width="440">
 </p>
 
 ## Getting started
@@ -140,7 +140,9 @@ walks you through it:
    gigabytes, so this is worth saying yes to if your computer's own drive is
    small. They go in a `Plex Artwork` folder on the drive. Plex's library
    database stays on your computer, so Plex stays quick, and Plex won't start
-   without the drive plugged in.
+   without the drive plugged in. This is only offered on Linux-formatted
+   drives (ext4, btrfs or xfs), and only if the drive doesn't already have
+   something called `Plex Artwork` on it.
 
 7. **Let it sleep.** A hard drive can stop spinning while nobody is watching
    anything: after 30 minutes (recommended), an hour, two hours, or never.

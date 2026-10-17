@@ -22,6 +22,11 @@ PRIVATE_CIDRS=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16)
 TCP_PORTS=(32400)
 UDP_PORTS=(32410 32412 32413 32414)
 FSTAB_MARK="# OmaPlex media drive:"
+# Every media drive opens with these. noatime: playing a file shouldn't
+# write to the disk (and keep it awake). nosuid and nodev: a drive that came
+# from somewhere else can't bring a set-uid program or a device file onto
+# this computer, the same as when the file manager opens a drive.
+DRIVE_OPTIONS="noatime,nosuid,nodev"
 PLEX_DATA="/var/lib/plex/Plex Media Server"
 # Artwork and posters (Metadata) and video thumbnails and previews (Media):
 # the parts of Plex's data that grow with the size of the collection.
@@ -230,17 +235,38 @@ step_server() {
 
 # ---------- artwork ----------
 
+# Whether a mount point is one of OmaPlex's own media drives in /etc/fstab.
+is_omaplex_drive() {
+  # shellcheck disable=SC2016 # awk's own fields, not shell variables
+  env MARK="$FSTAB_MARK" MP="${1// /\\040}" awk '
+    owned && $2 == ENVIRON["MP"] { found = 1 }
+    { owned = (index($0, ENVIRON["MARK"]) == 1) }
+    END { exit !found }' /etc/fstab
+}
+
 # The drive Plex's artwork lives on, if OmaPlex moved it there; else empty.
-# The link reads <drive>/<ARTWORK_FOLDER>/Metadata.
+# The link reads <drive>/<ARTWORK_FOLDER>/Metadata. It sits in Plex's own
+# folder, which the plex account can change, so it only counts when it names
+# a drive OmaPlex set up.
 artwork_home() {
-  local target
+  local target drive suffix="/$ARTWORK_FOLDER/${ARTWORK_DIRS[0]}"
   target=$(sudo readlink "$PLEX_DATA/${ARTWORK_DIRS[0]}" 2>/dev/null || true)
-  [[ -n $target ]] || return 0
-  dirname "$(dirname "$target")"
+  [[ $target == *"$suffix" ]] || return 0
+  drive=${target%"$suffix"}
+  if is_omaplex_drive "$drive"; then
+    printf '%s\n' "$drive"
+  fi
 }
 
 move_artwork() {
-  local drive="$1" dest="$1/$ARTWORK_FOLDER" current d
+  local drive="$1" dest="$1/$ARTWORK_FOLDER" current d fs
+  # Plex has to own its artwork folder, so only a drive with real owners can
+  # hold it. exFAT and NTFS drives leave the artwork on the computer.
+  fs=$(findmnt -rno FSTYPE --mountpoint "$drive" 2>/dev/null || true)
+  case $fs in
+    ext4 | btrfs | xfs) ;;
+    *) return 0 ;;
+  esac
   sudo test -d "$PLEX_DATA" || {
     note "Plex hasn't set itself up yet, so there's no artwork to move. Run this again once Plex has started."
     return 0
@@ -251,25 +277,47 @@ move_artwork() {
     return 0
   fi
 
+  # Anything already on the drive under that name (a folder, or a link
+  # pointing somewhere else on this computer) is left alone, never used.
+  if [[ -e $dest || -L $dest ]]; then
+    note "This drive already has something called \"$ARTWORK_FOLDER\", so Plex's artwork stays"
+    note "on the computer. Rename or remove it, then choose Add a media drive again."
+    return 0
+  fi
+
   echo
   note "Plex's artwork, posters and video previews can take many gigabytes for a big"
   note "collection. They can live on this drive instead of your computer's own drive."
   note "Plex's library database stays where it is, so it stays fast."
   gum confirm "Keep Plex's artwork on this drive?" || return 0
 
+  # The folder is made new, by root, and stays root's until everything is in
+  # it: mkdir never follows a link, and nothing else can write inside it
+  # meanwhile, so the copy and the change of owner can't be sent elsewhere.
+  sudo mkdir -m 750 "$dest" || die "Couldn't make the $ARTWORK_FOLDER folder on the drive."
   sudo systemctl stop "$SERVICE"
-  sudo install -d -o plex -g plex -m 750 "$dest"
   for d in "${ARTWORK_DIRS[@]}"; do
     if sudo test -d "$PLEX_DATA/$d" && ! sudo test -L "$PLEX_DATA/$d"; then
-      gum spin --title "Moving Plex's $d to the drive…" -- \
-        sudo cp -a "$PLEX_DATA/$d" "$dest/" || die "Couldn't copy Plex's $d to the drive. Nothing was changed."
-      sudo rm -rf --one-file-system "$PLEX_DATA/$d"
+      if ! gum spin --title "Copying Plex's $d to the drive…" -- \
+        sudo cp -a "$PLEX_DATA/$d" "$dest/$d"; then
+        sudo rm -rf --one-file-system "$dest"
+        sudo systemctl start "$SERVICE"
+        die "Couldn't copy Plex's $d to the drive. Nothing was changed."
+      fi
     else
-      sudo install -d -o plex -g plex -m 750 "$dest/$d"
+      sudo mkdir -m 750 "$dest/$d"
+      sudo chown -h plex:plex "$dest/$d"
+    fi
+  done
+  # Everything is copied: only now point Plex at the drive.
+  for d in "${ARTWORK_DIRS[@]}"; do
+    if sudo test -d "$PLEX_DATA/$d" && ! sudo test -L "$PLEX_DATA/$d"; then
+      sudo rm -rf --one-file-system "$PLEX_DATA/$d"
     fi
     sudo ln -sfn "$dest/$d" "$PLEX_DATA/$d"
     sudo chown -h plex:plex "$PLEX_DATA/$d"
   done
+  sudo chown -h plex:plex "$dest"
 
   # Plex must never start without the drive: it would quietly start filling
   # an empty folder on the computer's own drive instead.
@@ -306,21 +354,27 @@ drive_property() {
     awk '{ print $2 }'
 }
 
-# Add noatime to the drive's OmaPlex fstab line if it lacks it, so playing a
-# file doesn't also write "last opened" times back to the disks.
-ensure_noatime() {
-  local mount_point="$1" escaped
+# Add any of DRIVE_OPTIONS missing from the drive's OmaPlex fstab line (a
+# drive set up by an older OmaPlex), and apply them to the open drive.
+ensure_mount_options() {
+  local mount_point="$1" escaped current updated
   escaped="${mount_point// /\\040}"
-  grep -qsE "^[^#]*[[:space:]]${escaped//\\/\\\\}[[:space:]].*noatime" /etc/fstab && return 0
-  sudo cp -a /etc/fstab "/etc/fstab.bak.$(date +%s)"
+  current=$(cat /etc/fstab)
+  # shellcheck disable=SC2016 # awk's own fields, not shell variables
   # Through the environment, not awk -v: -v would turn fstab's \040 into a
   # space and the mount point would never match.
-  sudo env MARK="$FSTAB_MARK" MP="$escaped" awk '
-    owned && $2 == ENVIRON["MP"] && $4 !~ /(^|,)noatime(,|$)/ { $4 = $4 ",noatime" }
-    { owned = (index($0, ENVIRON["MARK"]) == 1); print }' /etc/fstab | sudo tee /etc/fstab.omaplex >/dev/null
+  updated=$(env MARK="$FSTAB_MARK" MP="$escaped" OPTS="$DRIVE_OPTIONS" awk '
+    owned && $2 == ENVIRON["MP"] {
+      n = split(ENVIRON["OPTS"], want, ",")
+      for (i = 1; i <= n; i++) if ($4 !~ ("(^|,)" want[i] "(,|$)")) $4 = $4 "," want[i]
+    }
+    { owned = (index($0, ENVIRON["MARK"]) == 1); print }' /etc/fstab)
+  [[ $updated == "$current" ]] && return 0
+  sudo cp -a /etc/fstab "/etc/fstab.bak.$(date +%s)"
+  printf '%s\n' "$updated" | sudo tee /etc/fstab.omaplex >/dev/null
   sudo mv -f /etc/fstab.omaplex /etc/fstab
   sudo systemctl daemon-reload
-  sudo mount -o remount,noatime "$mount_point" 2>/dev/null || true
+  sudo mount -o "remount,$DRIVE_OPTIONS" "$mount_point" 2>/dev/null || true
 }
 
 # Plex settings that decide how often it wakes the disks: look for changes
@@ -467,7 +521,7 @@ setup_sleep() {
     ok "The drive keeps spinning."
     return 0
   fi
-  ensure_noatime "$mount_point"
+  ensure_mount_options "$mount_point"
   quiet_plex_scans
   ok "The drive now sleeps after $idle with nothing playing, and wakes when it's needed."
 }
@@ -533,6 +587,7 @@ step_drive() {
   existing=$(printf '%b' "$existing")
   if [[ -n $existing ]] && grep -qsF " ${existing// /\\040} " /etc/fstab; then
     ok "This drive is already set up at $existing."
+    ensure_mount_options "$existing"
     uuid=$(sudo blkid -s UUID -o value "$DEVICE" 2>/dev/null || true)
     close_other_mounts "${uuid:+UUID=$uuid}" "$existing"
     if pacman -Q plex-media-server >/dev/null 2>&1 || pacman -Q plex-media-server-plexpass >/dev/null 2>&1; then
@@ -570,8 +625,7 @@ step_drive() {
   ident="${uuid:+UUID=$uuid}"
   ident="${ident:-$DEVICE}"
   # nofail: a missing drive must never stop the computer from booting.
-  # noatime: playing a file shouldn't write to the disk (and keep it awake).
-  opts="defaults,nofail,noatime,x-gvfs-show,x-gvfs-name=${name// /\\040}"
+  opts="defaults,nofail,$DRIVE_OPTIONS,x-gvfs-show,x-gvfs-name=${name// /\\040}"
   # Windows-format drives have no owners, so open them as yours and readable
   # by everyone. Skip the boot-time check on them (pass 0): NTFS has no
   # checker here, and checking a big USB drive at every start only slows it.
@@ -616,9 +670,11 @@ step_drive() {
     case $fs in
       ext4 | btrfs | xfs)
         note "On a big collection this takes a few minutes."
+        # -P: links on the drive are never followed, so nothing outside it
+        # is touched.
         # shellcheck disable=SC2016 # $1 expands in the inner shell
         if gum spin --title "Giving Plex permission to read your media…" -- \
-          sudo bash -c 'setfacl -R -m u:plex:rX "$1" && setfacl -R -d -m u:plex:rX "$1"' _ "$mount_point"; then
+          sudo bash -c 'setfacl -RP -m u:plex:rX "$1" && setfacl -RP -d -m u:plex:rX "$1"' _ "$mount_point"; then
           ok "Plex can read everything on this drive, including anything you add later."
         else
           note "Couldn't set that up automatically. Plex will use the files' own permissions."
@@ -633,7 +689,10 @@ step_drive() {
 
   if [[ -z $(find "$mount_point" -mindepth 1 -maxdepth 1 -not -name 'lost+found' -print -quit 2>/dev/null) ]]; then
     if gum confirm "The drive is empty. Make Movies, TV and Music folders on it?"; then
-      sudo install -d -o "$uid" -g "$gid" -m 775 "$mount_point/Movies" "$mount_point/TV" "$mount_point/Music"
+      # mkdir, not install -d: it never follows a link already there.
+      sudo mkdir -m 775 "$mount_point/Movies" "$mount_point/TV" "$mount_point/Music" ||
+        die "Couldn't make the folders."
+      sudo chown -h "$uid:$gid" "$mount_point/Movies" "$mount_point/TV" "$mount_point/Music"
       if [[ $fs == ext4 || $fs == btrfs || $fs == xfs ]] && id -u plex >/dev/null 2>&1; then
         sudo setfacl -m u:plex:rX -d -m u:plex:rX "$mount_point/Movies" "$mount_point/TV" "$mount_point/Music" || true
       fi
