@@ -233,6 +233,49 @@ step_server() {
   fi
 }
 
+# ---------- who can change a drive ----------
+
+# Whether your own group has nobody else in it.
+group_is_private() {
+  local gid members
+  gid=$(id -g)
+  members=$(getent group "$gid" | cut -d: -f4)
+  [[ -z $members || $members == "$USER" ]] || return 1
+  ! getent passwd | awk -F: -v g="$gid" -v me="$USER" '$4 == g && $1 != me { found = 1 } END { exit !found }'
+}
+
+# Whether anyone besides root and you can add, rename or remove things in a
+# folder on a drive. Root only works inside folders nobody else can change,
+# so nothing it is about to use can be swapped for a link part-way through.
+#   others_can_write <folder>       that folder alone
+#   others_can_write <folder> all   it and every folder under it, except
+#                                   Plex's own artwork folder (Plex owns it)
+# If the check itself fails, the answer is yes.
+others_can_write() {
+  local uid gid hit acl depth=(-maxdepth 0) group_w=(-perm -g+w)
+  uid=$(id -u)
+  gid=$(id -g)
+  [[ ${2:-} == all ]] && depth=(-path "$1/$ARTWORK_FOLDER" -prune -o)
+  # A folder your own group can write to is fine when the group is yours alone.
+  group_is_private && group_w+=(! -gid "$gid")
+  # Someone else owns it (and so can change its permissions), or a group or
+  # everyone can write to it.
+  hit=$(sudo find "$1" -xdev "${depth[@]}" -type d \
+    \( \( ! -uid 0 ! -uid "$uid" \) -o -perm -o+w -o \( "${group_w[@]}" \) \) -print -quit) || return 0
+  [[ -z $hit ]] || return 0
+  # Or an access list lets another account or group write to it.
+  acl=$(sudo find "$1" -xdev "${depth[@]}" -type d -print0 |
+    sudo xargs -0r getfacl -nPps --omit-header --) || return 0
+  # shellcheck disable=SC2016 # awk's own fields, not shell variables
+  env UID_ME="$uid" GID_ME="$gid" PRIVATE="$(group_is_private && echo 1)" awk -F: '
+    ($1 == "user" || $1 == "group") && $2 != "" && substr($3, 2, 1) == "w" {
+      if ($1 == "user" && $2 == ENVIRON["UID_ME"]) next
+      if ($1 == "group" && $2 == ENVIRON["GID_ME"] && ENVIRON["PRIVATE"]) next
+      found = 1
+    }
+    END { exit !found }' <<<"$acl"
+}
+
 # ---------- artwork ----------
 
 # Whether a mount point is one of OmaPlex's own media drives in /etc/fstab.
@@ -277,6 +320,15 @@ move_artwork() {
     return 0
   fi
 
+  # Root copies into a new folder at the top of the drive. If anyone else
+  # can change the top of the drive, they could swap that folder for one of
+  # their own mid-copy and send root's writes elsewhere.
+  if others_can_write "$drive"; then
+    note "Other accounts on this computer can change the top of this drive, so Plex's"
+    note "artwork stays on the computer."
+    return 0
+  fi
+
   # Anything already on the drive under that name (a folder, or a link
   # pointing somewhere else on this computer) is left alone, never used.
   if [[ -e $dest || -L $dest ]]; then
@@ -292,8 +344,9 @@ move_artwork() {
   gum confirm "Keep Plex's artwork on this drive?" || return 0
 
   # The folder is made new, by root, and stays root's until everything is in
-  # it: mkdir never follows a link, and nothing else can write inside it
-  # meanwhile, so the copy and the change of owner can't be sent elsewhere.
+  # it: mkdir never follows a link, only root and you can rename it (checked
+  # above), and nothing else can write inside it meanwhile, so the copy and
+  # the change of owner can't be sent elsewhere. Plex itself is stopped.
   sudo mkdir -m 750 "$dest" || die "Couldn't make the $ARTWORK_FOLDER folder on the drive."
   sudo systemctl stop "$SERVICE"
   for d in "${ARTWORK_DIRS[@]}"; do
@@ -575,7 +628,7 @@ close_other_mounts() {
 }
 
 step_drive() {
-  local DISKS=1 user="$USER" uid gid default_name base n pass mount_point name fs uuid ident opts line existing errfile
+  local DISKS=1 user="$USER" uid gid runner default_name base n pass mount_point name fs uuid ident opts line existing errfile
   uid=$(id -u)
   gid=$(id -g)
 
@@ -670,12 +723,25 @@ step_drive() {
     case $fs in
       ext4 | btrfs | xfs)
         note "On a big collection this takes a few minutes."
+        # Root walks the drive only when nobody else can change its folders
+        # mid-walk. Otherwise it's done as you, on what's yours.
+        runner=(sudo)
+        if others_can_write "$mount_point" all; then
+          runner=()
+        fi
         # -P: links on the drive are never followed, so nothing outside it
-        # is touched.
-        # shellcheck disable=SC2016 # $1 expands in the inner shell
+        # is touched. Plex's own artwork folder is Plex's already: skipped.
+        # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
         if gum spin --title "Giving Plex permission to read your media…" -- \
-          sudo bash -c 'setfacl -RP -m u:plex:rX "$1" && setfacl -RP -d -m u:plex:rX "$1"' _ "$mount_point"; then
+          "${runner[@]}" bash -c '
+            setfacl -P -m u:plex:rX -d -m u:plex:rX "$1" &&
+            find "$1" -mindepth 1 -maxdepth 1 ! -type l ! -name "$2" -exec setfacl -RP -m u:plex:rX {} + &&
+            find "$1" -mindepth 1 -maxdepth 1 -type d ! -name "$2" -exec setfacl -RP -d -m u:plex:rX {} +
+          ' _ "$mount_point" "$ARTWORK_FOLDER" 2>/dev/null; then
           ok "Plex can read everything on this drive, including anything you add later."
+        elif ((${#runner[@]} == 0)); then
+          note "Other accounts can change folders on this drive, so Plex was given access to"
+          note "your own files only. Everything else keeps its own permissions."
         else
           note "Couldn't set that up automatically. Plex will use the files' own permissions."
         fi
@@ -688,13 +754,17 @@ step_drive() {
   fi
 
   if [[ -z $(find "$mount_point" -mindepth 1 -maxdepth 1 -not -name 'lost+found' -print -quit 2>/dev/null) ]]; then
-    if gum confirm "The drive is empty. Make Movies, TV and Music folders on it?"; then
-      # mkdir, not install -d: it never follows a link already there.
+    if others_can_write "$mount_point"; then
+      note "Other accounts on this computer can change the top of this drive, so OmaPlex"
+      note "won't make folders there. Make your Movies, TV and Music folders yourself."
+    elif gum confirm "The drive is empty. Make Movies, TV and Music folders on it?"; then
+      # mkdir, not install -d: it never follows a link already there, and
+      # only root and you can change the top of the drive (checked above).
       sudo mkdir -m 775 "$mount_point/Movies" "$mount_point/TV" "$mount_point/Music" ||
         die "Couldn't make the folders."
       sudo chown -h "$uid:$gid" "$mount_point/Movies" "$mount_point/TV" "$mount_point/Music"
       if [[ $fs == ext4 || $fs == btrfs || $fs == xfs ]] && id -u plex >/dev/null 2>&1; then
-        sudo setfacl -m u:plex:rX -d -m u:plex:rX "$mount_point/Movies" "$mount_point/TV" "$mount_point/Music" || true
+        sudo setfacl -P -m u:plex:rX -d -m u:plex:rX "$mount_point/Movies" "$mount_point/TV" "$mount_point/Music" || true
       fi
       ok "Made Movies, TV and Music folders."
     fi
